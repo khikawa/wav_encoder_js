@@ -1,0 +1,140 @@
+<html>
+<head>
+    <link href="https://stackpath.bootstrapcdn.com/bootstrap/4.4.1/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body class="p-3">
+    <h1 class="mb-3">wav_encoder_js</h1>
+    <div id="app">
+        <button class="btn btn-danger" type="button" v-if="status=='ready'" @click="startRecording">録音開始</button>
+        <button class="btn btn-primary" type="button" v-if="status=='recording'" @click="stopRecording">録音終了</button>
+    </div>
+    <script src="https://unpkg.com/vue@3.2.26"></script>
+    <script>
+        const app = Vue.createApp({
+            el: '#app',
+            data() {
+                return {
+                    status: 'init',     // 状況
+                    stream: null,       // 音声トラックが含まれるストリーム
+                    audioContext: null, // 音声を処理する "AudioContext" のインスタンス
+                    source: null,       // メディアストリームのソースにアクセスする "MediaStreamSource" のオブジェクト
+                    processor: null,    // ダイレクトな音声処理を行うことができる "scriptProcessor" のオブジェクト
+                    bufferSize: 4096,
+                    sampleRate: 44100,
+                    audioData: []       // 入力された音声データ
+                }
+            },
+            methods: {
+                startRecording() {
+                    this.status = 'recording'
+                    this.audioData = []
+                    
+                    this.audioContext = new window.AudioContext()
+                    this.source = this.audioContext.createMediaStreamSource(this.stream)
+                    this.processor = this.audioContext.createScriptProcessor(this.bufferSize, 1, 1)
+                    this.processor.onaudioprocess = (event) => {
+                        const arr = new Float32Array(event.inputBuffer.getChannelData(0))
+                        this.audioData.push(arr)
+                    }
+                    this.source.connect(this.processor)
+                    this.processor.connect(this.audioContext.destination)
+                },
+                stopRecording() {
+                    this.status = 'ready'
+
+                    this.source.disconnect()
+                    this.processor.disconnect()
+                    this.audioContext.close()
+
+                    const url = this.encode()
+                    let a = document.createElement('a')
+                    a.href = url
+                    a.download = Math.floor(Date.now() / 1000) + ".wav"
+                    document.body.appendChild(a);
+                    a.click();
+                },
+                encode() {
+                    // audioDataの配列をflatten済みのFloat64Arrayにする
+                    let joinedAudioData = new Float64Array(this.audioData.length * this.bufferSize)
+                    let offset = 0
+                    for (let i = 0; i < this.audioData.length; i++) {
+                        let data = this.audioData[i]
+                        joinedAudioData.set(data, offset)
+                        offset += data.length
+                    }
+                    this.audioData = joinedAudioData
+
+                    // wav ヘッダー,データ部の書き込み
+                    let buffer = new ArrayBuffer(44 + this.audioData.length * 2)
+                    let view = new DataView(buffer)
+                    this.writeString(view, 0, "RIFF")
+                    view.setUint32(4, 36 + this.audioData.length * 2, true)
+                    this.writeString(view, 8, "WAVE")
+                    this.writeString(view, 12, "fmt ")
+                    view.setUint32(16, 16, true)
+                    view.setUint16(20, 1, true)
+                    view.setUint16(22, 1, true)
+                    view.setUint32(24, this.sampleRate, true)
+                    view.setUint32(28, this.sampleRate * 2, true)
+                    view.setUint16(32, 2, true)
+                    view.setUint16(34, 16, true)
+                    this.writeString(view, 36, "data")
+                    view.setUint32(40, this.audioData.length * 2, true)
+                    this.floatTo16BitPCM(view, 44, this.audioData)
+
+                    const blob = new Blob([view], { type: "audio/wav" })
+                    return URL.createObjectURL(blob)
+                },
+                floatTo16BitPCM(output, offset, input) {
+                    for (let i = 0; i < input.length; i++, offset += 2) {
+                        let s = Math.max(-1, Math.min(1, input[i]))
+                        output.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true)
+                    }
+                },
+                reverseFloatTo16BitPCM(output, offset, input) {
+                    for (let i = input.length - 1; i >= 0; i--, offset += 2) {
+                        let s = Math.max(-1, Math.min(1, input[i]))
+                        output.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true)
+                    }
+                },
+                HighpitchFloatTo16BitPCM(output, offset, input) {
+                    for (let i = 0; i < input.length; i += 3, offset += 2) {
+                        let s = Math.max(-1, Math.min(1, input[i]))
+                        output.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true)
+                        if (i != 0 && i % 6 == 0) {
+                            for (let j = i - 6; j <= i; j += 3, offset += 2) {
+                                s = Math.max(-1, Math.min(1, input[j]))
+                                output.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true)
+                            }
+                        }
+                    }
+                },
+                LowpitchFloatTo16BitPCM(output, offset, input) {
+                    for (let i = 0, j = 0; i < input.length; i++, offset += 2) {
+                        let s = Math.max(-1, Math.min(1, input[j]))
+                        output.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true)
+                        if (i != 0 && i % 2 == 0) {
+                            j++
+                        }
+                        if (i != 0 && i % 24 == 0) {
+                            j = i;
+                        }
+                    }
+                },
+                writeString(view, offset, string) {
+                    for (let i = 0; i < string.length; i++) {
+                        view.setUint8(offset + i, string.charCodeAt(i))
+                    }
+                }
+            },
+            async mounted() {
+                // マイクの使用許可を求める
+                this.stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+                this.status = 'ready'
+            }
+        });
+        app.mount('#app');
+    </script>
+</body>
+</html>
+
